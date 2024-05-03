@@ -1,63 +1,40 @@
-"""Contains the GraphEnricher class, which will be executed if this script
-is executed directly."""
+"""Contains the GraphCondenser class, which is used to minimise the size of
+graph used to generate routes. This is achieved by removing any nodes which
+represent a turn in a road rather than a junction, and removing any
+dead ends."""
 
+import itertools
 from copy import deepcopy
-from typing import List, Tuple, Union
+from typing import List, Tuple, Set, Any, Dict
 
 import networkx as nx
-from networkx import Graph
-from networkx.exception import NetworkXError
-
-from routing.containers.condensing import ChainMetrics
-
-# from refinement.containers import ChainMetrics
-# from refinement.graph_utils.splitter import (
-#     GraphSplitter,
-# )
+from networkx import DiGraph
+from networkx.exception import NetworkXNoPath
 
 
 class GraphCondenser:
-    """Class which enriches the data which is provided by Open Street Maps.
-    Unused data is stripped out, and elevation data is added for both nodes and
-    edges. The graph itself is condensed, with nodes that lead to dead ends
-    or only represent a bend in the route being removed.
+    """Minimises the size the provided graph. This is achieved by removing any
+    nodes which represent a turn in a road rather than a junction, and removing
+    any dead ends.
     """
 
-    def __init__(
-        self,
-        graph: Graph,
-    ):
-        """Create an instance of the graph enricher class based on the
-        contents of the networkx graph specified by `source_path`
+    def __init__(self, graph: DiGraph, start_node: int):
+        """Create an instance of the graph condenser using the provided graph.
+        This will create a copy of the provided graph, but the graph will
+        not be modified until the `condense_graph` method is called.
 
         Args:
-            source_path (str): The location of the networkx graph to be
-              enriched. The graph must have been saved to json format.
-            dist_mode (str, optional): The preferred output mode for distances
-              which are saved to node edges. Returns kilometers if set to
-              metric, miles if set to imperial. Defaults to "metric".
-            elevation_interval (int, optional): When calculating elevation
-              changes across an edge, values will be estimated by taking
-              checkpoints at regular checkpoints. Smaller values will result in
-              more accurate elevation data, but may slow down the calculation.
-              Defaults to 10.
-            max_condense_passes (int, optional): When condensing the graph, new
-              dead ends may be created on each pass (i.e. if one dead end
-              splits into two, pass 1 removes the 2 dead ends, pass 2 removes
-              the one they split from). Use this to set the maximum number of
-              passes which will be performed.
+            graph (DiGraph): The network graph to be condensed
+            start_node (int): The start point for the route to be generated,
+              required so that we don't remove it as a result of condensing
+              the graph.
         """
-
-        # TODO: Update this docstring
 
         # Store down user preferences
         self.graph = deepcopy(graph)
+        self.start_node = start_node
         self.max_condense_passes = 5
-        self.condense_passes = 0
-
-        # Create container objects
-        self.nodes_to_condense = set()
-        self.nodes_to_remove = set()
+        self._condense_passes = 0
 
     def _remove_isolates(self):
         """Remove any nodes from the graph which are not connected to another
@@ -65,192 +42,271 @@ class GraphCondenser:
         isolates = set(nx.isolates(self.graph))
         self.graph.remove_nodes_from(isolates)
 
-    def _remove_dead_ends(self):
-        """Remove any nodes which have been flagged for removal on account of
-        them representing a dead end."""
-        self.graph.remove_nodes_from(self.nodes_to_remove)
-
-    def _get_node_degree(self, node_id) -> int:
-        edges = self.graph.edges(node_id)
-        node_degree = len(edges)
-        return node_degree
-
-    def _refresh_node_lists(self):
-        """Check the graph for any nodes which can be condensed, or removed
-        entirely."""
-        self.nodes_to_condense = set()
-        self.nodes_to_remove = set()
-
-        for node_id in self.graph.nodes:
-            node_degree = self._get_node_degree(node_id)
-
-            if node_degree >= 3:
-                # Node is a junction, must be retained
-                continue
-            elif node_degree == 2:
-                # Node represents a bend in a straight line, can safely be
-                # condensed
-                self.nodes_to_condense.add(node_id)
-            elif node_degree == 1:
-                # Node is a dead end, can safely be removed
-                self.nodes_to_remove.add(node_id)
-            # Node is an orphan, will be caught by remove_isolates
-            continue
-
-    def _update_node_lists(self, applied_chain: List[int]):
-        start_id = applied_chain[0]
-        end_id = applied_chain[2]
-
-        end_degree = self._get_node_degree(end_id)
-
-        if start_id in self.nodes_to_condense:
-            start_degree = self._get_node_degree(start_id)
-            if start_degree != 2:
-                self.nodes_to_condense.remove(start_id)
-        if end_id in self.nodes_to_condense:
-            end_degree = self._get_node_degree(end_id)
-            if end_degree != 2:
-                self.nodes_to_condense.remove(end_id)
-
-    def _generate_node_chain(
-        self, node_id: int
-    ) -> Tuple[List[int], List[Tuple[int, int]]]:
-        """For a node with order 2, generate a chain which represents the
-        traversal of both edges. For example if node_id is B and node B is
-        connected to nodes A and C, the resultant chain would be [A, B, C].
-
-        Args:
-            node_id (int): The node which forms the middle of the chain
+    def _generate_node_sets(self) -> Tuple[Set[int], Set[int]]:
+        """Generate two sets of nodes; those which form part of the chains that
+        represent road geometry, and those which represent junctions.
 
         Returns:
-            Tuple[List[int], List[Tuple[int, int]]]: A list of the node IDs
-              which are crossed as part of this chain, and a list of the
-              edges which are traversed as part of this journey.
+            Tuple[Set[int], Set[int]]: A tuple containing a set of chain nodes,
+              and a set of other nodes
         """
-        node_edges = list(self.graph.edges(node_id))
-        node_chain = [node_edges[0][1], node_edges[0][0], node_edges[1][1]]
 
-        return node_chain, node_edges
+        # NOTE: We cannot simply require that the degree be 4, as this is a
+        #       directed graph. A node with 4 one-way exit points should not
+        #       be considered part of a chain. This prevents us from using the
+        #       built in graph.degree attribute.
+        node_list = list(self.graph.nodes)
+        degree_list = [
+            len(set(nx.all_neighbors(self.graph, node))) for node in node_list
+        ]
 
-    def _calculate_chain_metrics(
-        self, chain: List[int]
-    ) -> Union[ChainMetrics, None]:
-        """For a chain of 3 nodes, sum up the metrics for each of the edges
-        which it is comprised of.
+        chains_nodes = {
+            node
+            for node, degree in zip(node_list, degree_list)
+            if degree == 2 and node != self.start_node
+        }
+        other_nodes = {
+            node
+            for node, degree in zip(node_list, degree_list)
+            if degree != 2 or node == self.start_node
+        }
+        return chains_nodes, other_nodes
+
+    def _generate_chain_subgraphs(
+        self, chains_nodes: Set[int]
+    ) -> List[DiGraph]:
+        """Given a set containing all nodes which form part of a chain, return
+        a list of graphs where each graph contains a single chain.
 
         Args:
-            chain (List[int]): A list of 3 node IDs
+            chains_nodes (Set[int]): Every node in the internal graph which
+              forms part of a chain
 
         Returns:
-            ChainMetrics: A container for the calculated metrics
+            List[DiGraph]: A list of graphs, where each graph represents a
+              single chain in the internal graph
         """
 
-        try:
-            # Fetch the two edges for the chain
-            edge_1 = self.graph[chain[0]][chain[1]]
-            edge_2 = self.graph[chain[1]][chain[2]]
-        except KeyError:
-            # Edge does not exist in this direction
-            return None
+        # Single graph, contains all chains
+        chains_graph = self.graph.subgraph(chains_nodes)
 
-        # Retrieve data for edge 1
-        gain_1 = edge_1["elevation_gain"]
-        loss_1 = edge_1["elevation_loss"]
-        dist_1 = edge_1["distance"]
-        via_1 = edge_1.get("via", [])
+        # List of lists of node IDs, each list represents one chain
+        chains_list = nx.weakly_connected_components(chains_graph)
 
-        # Retrieve data for edge 2
-        gain_2 = edge_2["elevation_gain"]
-        loss_2 = edge_2["elevation_loss"]
-        dist_2 = edge_2["distance"]
-        via_2 = edge_2.get("via", [])
+        # List of graphs, each graph represents on chain
+        chain_graphs = [chains_graph.subgraph(chain) for chain in chains_list]
 
-        # Calculate whole-chain metrics
-        metrics = ChainMetrics(
-            start=chain[0],
-            end=chain[-1],
-            gain=gain_1 + gain_2,
-            loss=loss_1 + loss_2,
-            dist=dist_1 + dist_2,
-            vias=via_1 + [chain[1]] + via_2,
-        )
+        return chain_graphs
+
+    def _generate_chain_endpoints(
+        self, chain_graph: DiGraph
+    ) -> Tuple[int, int, int, int]:
+        """For a given chain, work out where it starts and ends. For the
+        identified start and end points, work out which junctions it connects
+        to.
+
+        Args:
+            chain_graph (DiGraph): A directed graph representing a single chain
+
+        Returns:
+            Tuple[int, int, int, int]: First node in the chain, last node in
+              the chain, connection point for first node, connection point for
+              last node
+        """
+
+        chain_nodes = set(chain_graph.nodes)
+        if len(chain_nodes) == 1:
+
+            # Start and end will be the same
+            chain_start = chain_end = list(chain_graph.nodes)[0]
+
+            # Single node will necessarily have 2 connections, as this is a
+            # requirement for any nodes in a chain
+            connections = list(
+                set(nx.all_neighbors(self.graph, chain_start)) - chain_nodes
+            )
+
+            # Arbitrarily define one as the starting connection, and the other
+            # as the ending connection.
+            edge_start = connections[0]
+            edge_end = connections[1]
+
+        else:
+
+            # Identify the nodes which connect to only one other node in the
+            # chain as the end points
+            node_list = list(chain_graph.nodes)
+            degree_list = [
+                len(set(nx.all_neighbors(chain_graph, node)))
+                for node in node_list
+            ]
+
+            end_points = [
+                node
+                for node, degree in zip(node_list, degree_list)
+                if degree == 1
+            ]
+
+            # Arbitrarily define one as the start of the chain, and the other
+            # as the end
+            chain_start = end_points[0]
+            chain_end = end_points[1]
+
+            # Identify the nodes which connect to the start and end nodes in
+            # the chain
+            edge_start = (
+                set(nx.all_neighbors(self.graph, chain_start)) - chain_nodes
+            ).pop()
+            edge_end = (
+                set(nx.all_neighbors(self.graph, chain_end)) - chain_nodes
+            ).pop()
+
+        return chain_start, chain_end, edge_start, edge_end
+
+    def _generate_hyperedge_metrics(
+        self, start: int, end: int, vias: List[int]
+    ) -> Dict[str, Any]:
+        """The new edge to be added must retain the pre-calculated distance
+        and elevation metrics. To do this, we must sum the metrics for each
+        link in the chain.
+
+        Args:
+            start (int): The starting point for the chain
+            end (int): The ending point for the chain
+            vias (List[int]): The mid-points in the chain
+
+        Raises:
+            NetworkXNoPath: If no route between `start` and `end` exists, an
+              exception will be raised.
+
+        Returns:
+            Dict[str, Any]: A dictionary containing distance, elevation_gain,
+              elevation_loss and type keys.
+        """
+        edges = itertools.pairwise([start] + vias + [end])
+
+        metrics = {
+            "distance": 0.0,
+            "elevation_gain": 0.0,
+            "elevation_loss": 0.0,
+            "type": "composite",
+        }
+        for edge in edges:
+            for metric in ["distance", "elevation_gain", "elevation_loss"]:
+                try:
+                    metrics[metric] += self.graph[edge[0]][edge[1]][metric]
+                except KeyError as exc:
+                    # This may occur when a bi-directional chain is connected
+                    # to the main graph by a one-directional edge. Note that
+                    # chains of length 1 are treated as bi-directional when
+                    # asking networkx to calculate the shortest path.
+                    raise NetworkXNoPath from exc
+
+        via_coords = [
+            (
+                self.graph.nodes[node]["lat"],
+                self.graph.nodes[node]["lon"],
+                self.graph.nodes[node]["elevation"],
+            )
+            for node in vias
+        ]
+        metrics["via"] = via_coords
 
         return metrics
 
-    def _add_edge_from_chain_metrics(self, metrics: Union[ChainMetrics, None]):
-        """Once metrics have been calculated for a node chain, use them to
-        create a new edge which skips over the middle node. The ID of this
-        middle node will be recorded within the `via` attribute of the new
-        edge.
+    def _remove_dead_ends(self, condensed_graph: DiGraph) -> DiGraph:
+        """Remove any dead ends from the condensed graph. This is achieved by
+        removing any nodes which connect to one one other node.
+
+        TODO: Confirm whether multiple passes are required when running this
+              over a condensed graph. Suspect it probably isn't.
 
         Args:
-            metrics (Union[ChainMetrics, None]): Container for calculated
-              metrics for this chain
+            condensed_graph (DiGraph): The condensed graph to be processed
+
+        Returns:
+            DiGraph: A reference to `condensed_graph` with no dead ends
         """
-        if metrics:
-            self.graph.add_edge(
-                metrics.start,
-                metrics.end,
-                via=metrics.vias,
-                elevation_gain=metrics.gain,
-                elevation_loss=metrics.loss,
-                distance=metrics.dist,
+
+        # Identify any dead end nodes
+        node_list = list(condensed_graph.nodes)
+        degree_list = [
+            len(set(nx.all_neighbors(condensed_graph, node)))
+            for node in node_list
+        ]
+        dead_end_nodes = {
+            node
+            for node, degree in zip(node_list, degree_list)
+            if degree == 1 and node != self.start_node
+        }
+
+        # Terminate early if none are present
+        if not dead_end_nodes:
+            return condensed_graph
+
+        # Remove dead end nodes, make a second pass
+        condensed_graph.remove_nodes_from(dead_end_nodes)
+
+        self._condense_passes += 1
+
+        if self._condense_passes == self.max_condense_passes:
+            return condensed_graph
+        return self._remove_dead_ends(condensed_graph)
+
+    def condense_graph(self) -> DiGraph:
+        """Replace the internal graph with a condensed representation of
+        itself. Any node chains which represent the geometry of a road will
+        be replaced with a single edge going from one junction to the next.
+        This will allow the route finding algorithm to generate new routes
+        more quickly.
+
+        Returns:
+            DiGraph: A condensed representation of the internal graph
+        """
+        # Remove any orphaned nodes
+        self._remove_isolates()
+
+        # Work out which nodes form part of a chain
+        chains_nodes, other_nodes = self._generate_node_sets()
+
+        # Create one graph for each chain
+        chain_subgraphs = self._generate_chain_subgraphs(chains_nodes)
+
+        # Generate new hyperedges based on these chains
+        new_edges = []
+        for chain_graph in chain_subgraphs:
+
+            # Figure out the start & end points for the chain, and which
+            # junctions it connects to
+            chain_start, chain_end, edge_start, edge_end = (
+                self._generate_chain_endpoints(chain_graph)
             )
 
-    def _remove_original_edges(self, node_edges: List[Tuple[int, int]]):
-        """Once a new edge has been created based on a node chain, the
-        original edges can be removed.
-
-        Args:
-            node_edges (List[Tuple[int, int]]): A list of node edges to be
-              removed from the graph.
-        """
-        # Remove original edges
-        for start, end in node_edges:
+            # If possible, generate a new edge going from start to end across
+            # the entire chain
             try:
-                self.graph.remove_edge(start, end)
-            except NetworkXError:
-                pass
-            try:
-                self.graph.remove_edge(end, start)
-            except NetworkXError:
+                vias_se = nx.shortest_path(chain_graph, chain_start, chain_end)
+                metrics_se = self._generate_hyperedge_metrics(
+                    edge_start, edge_end, vias_se  # type: ignore
+                )
+                new_edges.append((edge_start, edge_end, metrics_se))
+            except NetworkXNoPath:
                 pass
 
-    def condense_graph(self):
-        """Disconnect all nodes from the graph which contribute only
-        geometrical information (i.e. they form corners along paths/roads but
-        do not represent junctions). Update the edges in the graph to skip over
-        these nodes, instead going direct from one junction to the next.
-        """
-        self._remove_isolates()
-        self._refresh_node_lists()
+            # If possible, generate a new edge going from end to start across
+            # the entire chain
+            try:
+                vias_es = nx.shortest_path(chain_graph, chain_end, chain_start)
+                metrics_es = self._generate_hyperedge_metrics(
+                    edge_end, edge_start, vias_es  # type: ignore
+                )
+                new_edges.append((edge_end, edge_start, metrics_es))
+            except NetworkXNoPath:
+                pass
 
-        # Early stopping condition
-        if not self.nodes_to_condense:
-            return
+        # Create a new graph with all chains represented by these new
+        # hyperedges
+        condensed_graph = self.graph.subgraph(other_nodes).copy()
+        condensed_graph.add_edges_from(new_edges)
 
-        iters = 0
-        while self.nodes_to_condense:
-            node_id = self.nodes_to_condense.pop()
-
-            node_chain, node_edges = self._generate_node_chain(node_id)
-
-            se_metrics = self._calculate_chain_metrics(node_chain)
-            es_metrics = self._calculate_chain_metrics(node_chain[::-1])
-
-            self._add_edge_from_chain_metrics(se_metrics)
-            self._add_edge_from_chain_metrics(es_metrics)
-
-            self._remove_original_edges(node_edges)
-
-            # TODO: Update node lists based on knowledge of last node
-            #       processed, rather than redoing the entire thing
-            self._update_node_lists(node_chain)
-
-            iters += 1
-
-        self._remove_dead_ends()
-
-        if self.condense_passes < self.max_condense_passes:
-            self.condense_passes += 1
-            self.condense_graph()
+        return condensed_graph

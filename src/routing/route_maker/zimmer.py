@@ -4,7 +4,7 @@ route."""
 from copy import deepcopy
 from typing import Iterable, Tuple
 
-from networkx import Graph
+from networkx import DiGraph
 from routing.containers.routes import Route, RouteConfig, StepMetrics
 
 
@@ -13,7 +13,7 @@ class Zimmer:
     provided which will generate a list of possible nodes to step to, and
     applying those steps to a given route."""
 
-    def __init__(self, graph: Graph, config: RouteConfig):
+    def __init__(self, graph: DiGraph, config: RouteConfig):
         """Store down the required information to handle processing of routes
 
         Args:
@@ -27,12 +27,10 @@ class Zimmer:
         self.config = config
 
     def _validate_step(self, route: Route, node_id: int) -> bool:
-        """For a given route and potential next step, validate that taking
-        this step will not result in the algorithm being unable to return to
-        the start point within the configured maximum distance. Steps to
-        nodes which have already been visited are also considered invalid,
-        except for the last 5% of the route (to increase the odds of being
-        able to find a valid circular route).
+        """For a given route and potential next step, verify that the step
+        does not result in us visiting a node we've already been to. This
+        requirement is waived when revisiting one of the first 3 nodes in
+        the route, to make it easier to get back to the start point.
 
         Args:
             route (Route): An (incomplete) candidate route
@@ -42,25 +40,19 @@ class Zimmer:
             bool: Whether or not the provided node_id would be a valid step
               to take
         """
-        # try:
-        #     prev_node = route.route[-2]
-        # except IndexError:
-        #     prev_node = None
-        visited = route.visited
-        # remaining = self.config.target_distance - route.distance
-        # remaining_perc = remaining / (self.config.max_distance)
 
+        visited = route.visited
+
+        # We can always step to new nodes
         if node_id not in visited:
             return True
 
+        # Allow steps back to the first 3 nodes, but prevent backtracking
         first_3_nodes = set(route.route[:3])
         last_3_nodes = set(route.route[-3:])
         if node_id in first_3_nodes and node_id not in last_3_nodes:
             return True
-        # elif remaining_perc <= 0.05:
-        #     if node_id == prev_node:
-        #         return False
-        #     return True
+
         return False
 
     def generate_possible_steps(self, route: Route) -> Iterable[int]:
@@ -101,13 +93,11 @@ class Zimmer:
         distance = step["distance"]
         gain = step["elevation_gain"]
         loss = step["elevation_loss"]
-        via = step.get("via", [])
 
         step_metrics = StepMetrics(
             distance=distance,
             elevation_gain=gain,
             elevation_loss=loss,
-            via=via,
         )
 
         return step_metrics
@@ -146,9 +136,7 @@ class Zimmer:
             Route: An updated candidate route, which now ends at 'next_node'
         """
 
-        route.route += step_metrics.via
         route.route.append(next_node)
-
         route.visited.add(next_node)
 
         # TODO: Use dunder methods to enable arithmetic with these types

@@ -1,13 +1,22 @@
-from networkx import Graph
+"""Some basic functions for plotting routes and their elevation profiles,
+this will be a prime target for development once work on the webapp gets
+underway."""
+
+from networkx import DiGraph
 from plotly import graph_objects as go
 
 from routing.containers.routes import Route
 
-# TODO: For final output, use difflib to ensure each suggested route is
-#       significantly different from the next.
-
 
 def generate_filename(route: Route) -> str:
+    """Generate a file name for the provided route.
+
+    Args:
+        route (Route): A populated route
+
+    Returns:
+        str: A name for the provided route
+    """
     gain = route.elevation_gain
     dist = route.distance
     name = f"gain_{gain:,.2f}_dist_{dist:,.2f}"
@@ -17,7 +26,7 @@ def generate_filename(route: Route) -> str:
 # TODO: Use dash-leaflet to rewrite this function
 
 
-def plot_elevation_profile(graph: Graph, route: Route) -> go.Figure:
+def plot_elevation_profile(graph: DiGraph, route: Route) -> go.Figure:
     """For a generated route, generate a plotly graph which displays the
     elevation profile.
 
@@ -53,7 +62,7 @@ def plot_elevation_profile(graph: Graph, route: Route) -> go.Figure:
     return figure
 
 
-def plot_route(graph: Graph, route: Route) -> go.Figure:
+def plot_route(graph: DiGraph, route: Route) -> go.Figure:
     """For a generated route, generate a Plotly graph which plots it onto
     a mapbox map.
 
@@ -77,7 +86,15 @@ def plot_route(graph: Graph, route: Route) -> go.Figure:
         if last_id is None:
             step_dist = 0
         else:
-            step_dist = graph[last_id][node_id]["distance"]
+            step = graph[last_id][node_id]
+            step_dist = step["distance"]
+
+            if "via" in step:
+                for lat, lon, ele in step["via"]:
+                    lats.append(lat)
+                    lons.append(lon)
+                    eles.append(ele)
+                    dists.append(None)
 
         cml_dist += step_dist
         last_id = node_id
@@ -88,16 +105,15 @@ def plot_route(graph: Graph, route: Route) -> go.Figure:
         dists.append(cml_dist)
 
     text = [
-        f"Distance: {dist:,.2f}km\nElevation: {ele:,.2f}m"
+        f"Distance: {dist:,.2f}km\nElevation: {ele:,.2f}m" if dist else ""
         for ele, dist in zip(eles, dists)
     ]
 
     route_trace = go.Scattermapbox(
-        mode="lines+markers",
+        mode="lines",
         lat=lats,
         lon=lons,
         text=text,
-        marker=dict(color=dists, colorscale="agsunset", size=3),
     )
     se_trace = go.Scattermapbox(
         mode="markers", lat=lats[0:1], lon=lons[0:1], marker=dict(size=20)

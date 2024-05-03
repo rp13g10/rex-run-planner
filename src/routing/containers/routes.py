@@ -1,5 +1,8 @@
-from typing import List, Set, Optional, Tuple
+"""Container objects which are used to represent various structures used
+during the route finding process"""
+
 from dataclasses import dataclass, field
+from typing import List, Set, Tuple, Optional
 
 
 @dataclass
@@ -11,14 +14,11 @@ class StepMetrics:
         distance (float): The distance change
         elevation_gain (float): The elevation increase
         elevation_loss (float): The elevation los
-        via (List[int]): The identifiers of any nodes crossed as part of this
-          step
     """
 
     distance: float
     elevation_gain: float
     elevation_loss: float
-    via: List[int]
 
 
 @dataclass
@@ -105,6 +105,8 @@ class RouteConfig:
     terrain_types: List[str] = field(default_factory=list)
 
     def __post_init__(self):
+        """Calculate min_distance and max_distance based on user provided
+        target_distance and tolerance"""
 
         self.min_distance = self.target_distance / (1 + self.tolerance)
         self.max_distance = self.target_distance * (1 + self.tolerance)

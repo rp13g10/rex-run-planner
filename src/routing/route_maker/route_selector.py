@@ -3,7 +3,7 @@
 #       list. Skip any items with a similarity score which is above a defined
 #       threshold when compared to any already selected route.
 # from difflib import SequenceMatcher
-from fuzzywuzzy import fuzz
+from thefuzz import fuzz
 from typing import List
 from routing.containers.routes import Route
 

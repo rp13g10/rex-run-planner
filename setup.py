@@ -7,5 +7,17 @@ setup(
     version="0.1.0",
     where="src",
     include="routing",
-    setup_requires=["networkx>=3.2.0", "pyspark", "geopy"],
+    setup_requires=[
+        # "graph-tool", # Hidden dependency, requires custom install
+        "thefuzz",
+        "python-levenshtein",
+        "geopy",
+        "dash",
+        "plotly",
+        "tqdm",
+        "bng-latlon",
+        "pyarrow",
+        "pandas",
+        "networkx",
+    ],
 )

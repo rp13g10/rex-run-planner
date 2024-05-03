@@ -1,9 +1,13 @@
+"""Contains the RoutePruner class, which aims to reduce the number of candidate
+routes. It selects the N most promising candidates according to the user
+provided preferences."""
+
 import math
 from collections import defaultdict
 from typing import Dict, List, Tuple
 
 import numpy as np
-from networkx import Graph
+from networkx import DiGraph
 
 from routing.containers.routes import RouteConfig, Route
 from routing.containers.pruning import BBox
@@ -13,7 +17,14 @@ class RoutePruner:
     """Class which reduces the number of candidate routes, selecting the most
     promising candidates according to the supplied user preferences."""
 
-    def __init__(self, graph: Graph, config: RouteConfig):
+    def __init__(self, graph: DiGraph, config: RouteConfig):
+        """Class which reduces the number of candidate routes, selecting the
+        most promising candidates according to the supplied user preferences.
+
+        Args:
+            graph (DiGraph): _description_
+            config (RouteConfig): _description_
+        """
         self.graph = graph
         self.config = config
 
@@ -146,7 +157,8 @@ class RoutePruner:
                 continue
 
         raise KeyError(
-            f"Unable to locate a terminal grid square for node: {terminal_node}"
+            "Unable to locate a terminal grid square for node: "
+            f"{terminal_node}"
         )
 
     def _tag_routes_with_terminal_grid_square(
